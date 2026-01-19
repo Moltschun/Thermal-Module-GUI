@@ -1,3 +1,12 @@
-# FLIR camera debug tool
+# Thermal-Module-GUI
 
-Python debug tool for testing FLIR cameras via Spinnaker SDK
+Профессиональный графический интерфейс (GUI) для управления тепловизионными модулями.
+
+## Поддерживаемое оборудование
+* **Pergam Axion Uncooled HD 1920** (Network/RTSP)
+* **FLIR Blackfly S** (USB3/Spinnaker)
+
+## Возможности
+* Просмотр потока с минимальной задержкой (Zero-Copy rendering).
+* Программная обработка изображения (Gain, Gamma) в реальном времени.
+* Захват кадров и телеметрия.
