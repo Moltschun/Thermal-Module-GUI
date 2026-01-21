@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 
 """
-Axion Controller Module.
-
-Драйвер для работы с сетевым тепловизором Pergam Axion через RTSP.
-Использует OpenCV для захвата потока.
+Axion Controller Module v4.0 (Lite)
+- Removed: Snapshot, Exposure, WB placeholders
+- Kept: RTSP Low Latency, Digital Gain, Raw Recording
 """
 
+import os
 import time
 import logging
 import cv2
 import numpy as np
+from datetime import datetime
+from threading import Thread, Lock
 
 from PySide6.QtCore import (
     QObject, Signal, Property, QThread, 
@@ -19,14 +21,13 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QImage, QColor
 from PySide6.QtQuick import QQuickImageProvider
 
-# Настройка логгера
+# === [BOOST] УСКОРЕНИЕ RTSP ===
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|fflags;nobuffer|flags;low_delay"
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Axion_System")
 
 class LiveImageProvider(QQuickImageProvider):
-    """
-    Тот же провайдер, что и раньше. Zero-Copy механизм.
-    """
     def __init__(self):
         super().__init__(QQuickImageProvider.ImageType.Image)
         self._current_image = QImage(800, 600, QImage.Format_RGB888)
@@ -42,67 +43,86 @@ class LiveImageProvider(QQuickImageProvider):
             if not image.isNull():
                 self._current_image = image
 
+class FrameRecorder:
+    """Модуль фоновой записи (без тормозов интерфейса)"""
+    def __init__(self):
+        self.recording = False
+        self.queue = []
+        self.lock = Lock()
+        self.save_thread = None
+        
+    def start(self):
+        self.queue = []
+        self.recording = True
+        logger.info(">>> START RECORDING")
+        
+    def add_frame(self, frame):
+        if self.recording:
+            with self.lock:
+                self.queue.append(frame.copy())
+                
+    def stop(self):
+        self.recording = False
+        logger.info(f">>> STOP RECORDING. Buffer: {len(self.queue)}")
+        self.save_thread = Thread(target=self._save_worker, args=(self.queue,))
+        self.save_thread.start()
+        
+    def _save_worker(self, frames):
+        if not frames: return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder = os.path.join("Recordings", f"Session_{timestamp}")
+        os.makedirs(folder, exist_ok=True)
+        
+        logger.info(f"Saving {len(frames)} frames to {folder}...")
+        for i, frame in enumerate(frames):
+            fname = os.path.join(folder, f"frame_{i:04d}.tiff")
+            cv2.imwrite(fname, frame)
+        logger.info("Save complete.")
+
 class AxionWorker(QThread):
-    """
-    Сетевой рабочий поток.
-    Захватывает RTSP поток через OpenCV.
-    """
     frame_ready = Signal(QImage)
     status_changed = Signal(str)
     fps_updated = Signal(float)
     
-    # === НАСТРОЙКИ ПОДКЛЮЧЕНИЯ ===
-    # Ссылка из документации DALI/Pergam
     RTSP_URL = "rtsp://admin:Admin123@192.168.1.102:554/stream/live?dev=0&chn=0"
 
-    def __init__(self):
+    def __init__(self, recorder):
         super().__init__()
+        self.recorder = recorder
         self.running = False
         self.cap = None
-        
-        # Программные настройки (Digital Processing)
-        self.digital_gain = 1.0    # Умножитель яркости
-        self.digital_gamma = 1.0   # Гамма-коррекция
+        self.digital_gain = 1.0
 
     def run(self):
-        logger.info(f"Connecting to Axion: {self.RTSP_URL}")
         self.status_changed.emit("Подключение...")
         self.running = True
         
         while self.running:
-            # 1. Инициализация захвата
             self.cap = cv2.VideoCapture(self.RTSP_URL, cv2.CAP_FFMPEG)
-            
-            # Оптимизация буфера для снижения задержки (Latency)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             
             if not self.cap.isOpened():
-                self.status_changed.emit("Ошибка сети. Рестарт через 3с...")
-                logger.error("Failed to open RTSP stream. Retrying...")
-                time.sleep(3)
+                self.status_changed.emit("Ошибка сети...")
+                time.sleep(2)
                 continue
             
-            self.status_changed.emit("Камера запущена")
-            logger.info("Stream opened successfully")
-            
+            self.status_changed.emit("ONLINE")
             fps_counter = 0
             fps_timer = time.time()
             
-            # 2. Цикл чтения кадров
             while self.running and self.cap.isOpened():
                 ret, frame = self.cap.read()
+                if not ret: break
                 
-                if not ret:
-                    logger.warning("Frame drop or connection lost")
-                    break # Выход из внутреннего цикла -> переподключение
+                # 1. Запись
+                self.recorder.add_frame(frame)
                 
-                # Обработка кадра
-                processed_frame = self._process_frame(frame)
-                qimage = self._convert_to_qimage(processed_frame)
-                
+                # 2. Обработка (Gain)
+                display_frame = self._process_frame(frame)
+                qimage = self._convert_to_qimage(display_frame)
                 self.frame_ready.emit(qimage)
                 
-                # Считаем FPS
+                # 3. FPS
                 fps_counter += 1
                 if time.time() - fps_timer >= 1.0:
                     fps = fps_counter / (time.time() - fps_timer)
@@ -110,71 +130,43 @@ class AxionWorker(QThread):
                     fps_counter = 0
                     fps_timer = time.time()
 
-            # Если вышли из цикла чтения - освобождаем ресурсы перед рестартом
-            if self.cap:
-                self.cap.release()
+            if self.cap: self.cap.release()
                 
         self.status_changed.emit("Остановлено")
 
     def _process_frame(self, frame):
-        """
-        Программная обработка яркости/контраста,
-        так как через RTSP мы не можем менять настройки сенсора напрямую.
-        """
-        if self.digital_gain == 1.0 and self.digital_gamma == 1.0:
-            return frame
-            
-        # Применяем Gain (просто умножаем пиксели)
-        res = cv2.convertScaleAbs(frame, alpha=self.digital_gain, beta=0)
-        return res
+        if self.digital_gain == 1.0: return frame
+        return cv2.convertScaleAbs(frame, alpha=self.digital_gain, beta=0)
 
     def _convert_to_qimage(self, cv_img):
-        """Конвертация BGR -> QImage"""
         try:
-            # RTSP отдает BGR
             rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
-            bytes_per_line = ch * w
-            img = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            return img.copy()
-        except Exception:
-            return QImage()
-            
+            return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+        except: return QImage()
+        
     def stop(self):
         self.running = False
         self.wait()
         
-    def set_params(self, gain, gamma):
-        # Gain слайдер от 0 до 40 -> переводим в множитель 1.0 ... 3.0
-        # Gamma слайдер от 0.8 до 3.0
-        self.digital_gain = 1.0 + (gain / 20.0) 
-        self.digital_gamma = gamma # Пока не используем сложную гамму для скорости
+    def set_gain(self, val):
+        self.digital_gain = 1.0 + (val / 20.0)
 
 class AxionController(QObject):
-    """
-    Контроллер для Pergam Axion.
-    API совместим с CameraController (те же сигналы и свойства).
-    """
     imagePathChanged = Signal()
     statusChanged = Signal()
     currentFpsChanged = Signal()
-    
-    # Свойства для совместимости с QML
     gainValueChanged = Signal()
-    wbRedValueChanged = Signal() # Будет использоваться как Gamma/Brightness
-    exposureValueChanged = Signal() # Заглушка
+    isRecordingChanged = Signal()
 
     def __init__(self):
         super().__init__()
         self._image_path = ""
         self._status = "Готов"
         self._fps = 0.0
-        
-        # Значения слайдеров
         self._gain = 0.0
-        self._wb_red = 1.0 # Используем как доп. параметр
-        self._exposure = 20000.0
         
+        self.recorder = FrameRecorder()
         self.worker = None
         self.provider = None
 
@@ -184,21 +176,29 @@ class AxionController(QObject):
     @Slot()
     def start_camera(self):
         if self.worker and self.worker.isRunning(): return
-        
-        self.worker = AxionWorker()
+        self.worker = AxionWorker(self.recorder)
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.status_changed.connect(self._on_status)
         self.worker.fps_updated.connect(self._on_fps)
         self.worker.start()
-        
-        # Применяем настройки сразу
-        self.worker.set_params(self._gain, self._wb_red)
+        self.worker.set_gain(self._gain)
 
     @Slot()
     def stop_camera(self):
         if self.worker:
             self.worker.stop()
             self.worker = None
+
+    @Slot()
+    def toggle_recording(self):
+        if self.recorder.recording:
+            self.recorder.stop()
+        else:
+            self.recorder.start()
+        self.isRecordingChanged.emit()
+
+    @Property(bool, notify=isRecordingChanged)
+    def isRecording(self): return self.recorder.recording
 
     def _on_frame(self, qimg):
         if self.provider:
@@ -213,14 +213,7 @@ class AxionController(QObject):
     def _on_fps(self, val):
         self._fps = val
         self.currentFpsChanged.emit()
-        
-    @Slot(str, str, int)
-    def capture_photo(self, path, fmt, q):
-        # Заглушка для фото
-        logger.info(f"Снимок сохранен в {path}")
 
-    # === QML PROPERTIES ===
-    
     @Property(str, notify=imagePathChanged)
     def imagePath(self): return self._image_path
 
@@ -230,29 +223,10 @@ class AxionController(QObject):
     @Property(float, notify=currentFpsChanged)
     def currentFps(self): return self._fps
 
-    # --- Слайдеры ---
-    # Gain
     @Property(float, notify=gainValueChanged)
     def gainValue(self): return self._gain
     @gainValue.setter
     def gainValue(self, val):
         self._gain = val
-        if self.worker: self.worker.set_params(self._gain, self._wb_red)
+        if self.worker: self.worker.set_gain(val)
         self.gainValueChanged.emit()
-
-    # WB Red (используем как Gamma/Contrast в этом контроллере)
-    @Property(float, notify=wbRedValueChanged)
-    def wbRedValue(self): return self._wb_red
-    @wbRedValue.setter
-    def wbRedValue(self, val):
-        self._wb_red = val
-        if self.worker: self.worker.set_params(self._gain, self._wb_red)
-        self.wbRedValueChanged.emit()
-
-    # Exposure (пока заглушка, т.к. по RTSP нельзя менять выдержку)
-    @Property(float, notify=exposureValueChanged)
-    def exposureValue(self): return self._exposure
-    @exposureValue.setter
-    def exposureValue(self, val):
-        self._exposure = val
-        self.exposureValueChanged.emit()

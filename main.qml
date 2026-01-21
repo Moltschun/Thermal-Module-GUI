@@ -1,28 +1,22 @@
 /*
- * Main Interface (main.qml)
- * * Основной экран управления тепловизионной системой.
- * Оптимизирован для сенсорного управления (Tablet UI).
- * * Структура:
- * - Левая часть: Видеопоток (Image Provider)
- * - Правая часть: Панель управления (Gain, Exposure, WB) и Телеметрия
+ * Main Interface v4.1 (Big Start Button)
+ * - Start Button: Increased size and visibility
  */
 
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
-import QtQuick.Dialogs
 import QtQuick.Controls.Material
 
 ApplicationWindow {
     id: window
-    title: "FLIR Mobile Command"
+    title: "Thermal Command Interface"
     visible: true
     width: 1280
     height: 800
     color: "#121212"
 
-    // Material Design: Dark Theme
     Material.theme: Material.Dark
     Material.accent: Material.LightGreen
 
@@ -42,241 +36,166 @@ ApplicationWindow {
                 id: camView
                 anchors.fill: parent
                 fillMode: Image.PreserveAspectFit
-                // Используем провайдер "live"
-                source: cameraController.imagePath
+                source: cameraController.imagePath 
                 cache: false
-                asynchronous: false
-                mipmap: true
             }
 
-            // Заглушка при отсутствии сигнала
-            Column {
-                anchors.centerIn: parent
-                visible: cameraController.status !== "Камера запущена"
-                spacing: 15
+            // Оверлей статуса
+            Rectangle {
+                anchors { left: parent.left; top: parent.top; margins: 20 }
+                width: childrenRect.width + 30; height: 40
+                radius: 8
+                color: "#aa000000"
+                border.color: cameraController.status === "ONLINE" ? "#00e676" : "#ff1744"
                 
                 Text {
-                    text: "NO SIGNAL"
-                    color: "#333"
-                    font.pixelSize: 48
+                    anchors.centerIn: parent
+                    text: "STATUS: " + cameraController.status
+                    color: "white"
                     font.bold: true
-                    anchors.horizontalCenter: parent.horizontalCenter
-                }
-                Text {
-                    text: "SYSTEM STANDBY"
-                    color: "#444"
-                    font.pixelSize: 20
-                    anchors.horizontalCenter: parent.horizontalCenter
                 }
             }
         }
 
         // === ЗОНА 2: ПАНЕЛЬ УПРАВЛЕНИЯ (Справа) ===
         Rectangle {
-            Layout.preferredWidth: 380
+            Layout.preferredWidth: 350
             Layout.fillHeight: true
             color: "#1e1e1e"
             
-            // Вертикальный разделитель
-            Rectangle { 
-                width: 2; height: parent.height; color: "#333"; anchors.left: parent.left 
-            }
-
-            ScrollView {
+            ColumnLayout {
                 anchors.fill: parent
                 anchors.margins: 20
-                clip: true
+                spacing: 20
 
+                Text {
+                    text: "CONTROL MODULE"
+                    color: "#808080"
+                    font.pixelSize: 14
+                    font.bold: true
+                    Layout.alignment: Qt.AlignHCenter
+                }
+                
+                // КНОПКИ УПРАВЛЕНИЯ
                 ColumnLayout {
-                    width: parent.width - 40
-                    spacing: 30
+                    Layout.fillWidth: true
+                    spacing: 15
 
-                    Text {
-                        text: "НАСТРОЙКИ СЕНСОРОВ"
-                        color: "#666"
-                        font.pixelSize: 16
+                    // === [MODIFIED] БОЛЬШАЯ КНОПКА СТАРТ ===
+                    Button {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 120 // Сделали большой размер
+                        
+                        // Блокируем кнопку, если камера уже работает
+                        enabled: cameraController.status !== "ONLINE"
+                        
+                        text: "ЗАПУСК"
+                        font.pixelSize: 32
                         font.bold: true
+                        
+                        highlighted: true
+                        Material.accent: Material.Green // Ярко-зеленый цвет
+                        
+                        onClicked: cameraController.start_camera()
                     }
 
-                    // --- SLIDER 1: УСИЛЕНИЕ (GAIN) ---
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 15
-                        RowLayout {
-                            Text { text: "Усиление (дБ)"; color: "white"; font.pixelSize: 22; font.bold: true }
-                            Item { Layout.fillWidth: true }
-                            Text { text: cameraController.gainValue.toFixed(1); color: "#00e676"; font.pixelSize: 22; font.bold: true }
-                        }
-                        Slider {
-                            id: gainSlider
-                            Layout.fillWidth: true; Layout.preferredHeight: 50
-                            from: 0.0; to: 40.0; value: cameraController.gainValue
+                    // КНОПКА ЗАПИСИ
+                    Button {
+                        Layout.fillWidth: true; Layout.preferredHeight: 80
+                        enabled: cameraController.status === "ONLINE"
+                        onClicked: cameraController.toggle_recording()
+                        
+                        background: Rectangle { 
+                            color: cameraController.isRecording ? "#ff1744" : "#2196f3"
+                            radius: 12
+                            opacity: parent.enabled ? 1 : 0.3 
                             
-                            handle: Rectangle {
-                                x: gainSlider.leftPadding + gainSlider.visualPosition * (gainSlider.availableWidth - width)
-                                y: gainSlider.topPadding + gainSlider.availableHeight / 2 - height / 2
-                                width: 48; height: 48; radius: 24
-                                color: gainSlider.pressed ? "#00e676" : "#f6f6f6"; border.color: "#333"
-                            }
-                            onMoved: cameraController.gainValue = value
-                        }
-                    }
-
-                    // --- SLIDER 2: ВЫДЕРЖКА (EXPOSURE) ---
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 15
-                        RowLayout {
-                            Text { text: "Выдержка (мкс)"; color: "white"; font.pixelSize: 22; font.bold: true }
-                            Item { Layout.fillWidth: true }
-                            Text { text: Math.round(cameraController.exposureValue); color: "#00b0ff"; font.pixelSize: 22; font.bold: true }
-                        }
-                        Slider {
-                            id: expSlider
-                            Layout.fillWidth: true; Layout.preferredHeight: 50
-                            from: 1000.0; to: 50000.0; // 1ms - 50ms
-                            value: cameraController.exposureValue
-                            
-                            handle: Rectangle {
-                                x: expSlider.leftPadding + expSlider.visualPosition * (expSlider.availableWidth - width)
-                                y: expSlider.topPadding + expSlider.availableHeight / 2 - height / 2
-                                width: 48; height: 48; radius: 24
-                                color: expSlider.pressed ? "#00b0ff" : "#f6f6f6"; border.color: "#333"
-                            }
-                            onMoved: cameraController.exposureValue = value
-                        }
-                    }
-
-                    // --- SLIDER 3: БАЛАНС (RED RATIO) ---
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 15 
-                        RowLayout {
-                            Text { text: "Баланс (Красный)"; color: "white"; font.pixelSize: 22; font.bold: true }
-                            Item { Layout.fillWidth: true }
-                            Text { text: cameraController.wbRedValue.toFixed(2); color: "#ff9100"; font.pixelSize: 22; font.bold: true }
-                        }
-                        Slider {
-                            id: wbSlider
-                            Layout.fillWidth: true; Layout.preferredHeight: 50
-                            from: 0.8; to: 3.0; value: cameraController.wbRedValue
-                            
-                            handle: Rectangle {
-                                x: wbSlider.leftPadding + wbSlider.visualPosition * (wbSlider.availableWidth - width)
-                                y: wbSlider.topPadding + wbSlider.availableHeight / 2 - height / 2
-                                width: 48; height: 48; radius: 24
-                                color: wbSlider.pressed ? "#ff9100" : "#f6f6f6"; border.color: "#333"
-                            }
-                            onMoved: cameraController.wbRedValue = value
-                        }
-                    }
-
-                    Item { Layout.fillHeight: true } // Пружина-распорка
-
-                    // --- КНОПКИ УПРАВЛЕНИЯ ---
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 20
-
-                        Button {
-                            Layout.fillWidth: true; Layout.preferredHeight: 90
-                            enabled: cameraController.status === "Камера запущена"
-                            onClicked: fileDialog.open()
-                            background: Rectangle { 
-                                color: parent.down ? "#1565c0" : "#2196f3" 
-                                radius: 16
-                                opacity: parent.enabled ? 1 : 0.3 
-                            }
-                            contentItem: Text { 
-                                text: "СНИМОК"
-                                font.pixelSize: 24; font.bold: true; color: "white" 
-                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter 
+                            // Пульсация при записи
+                            SequentialAnimation on opacity {
+                                running: cameraController.isRecording
+                                loops: Animation.Infinite
+                                NumberAnimation { from: 1; to: 0.6; duration: 800 }
+                                NumberAnimation { from: 0.6; to: 1; duration: 800 }
                             }
                         }
-
-                        Button {
-                            Layout.fillWidth: true; Layout.preferredHeight: 90 
-                            visible: cameraController.status !== "Камера запущена"
-                            onClicked: cameraController.start_camera()
-                            background: Rectangle { color: parent.down ? "#2e7d32" : "#43a047"; radius: 16 }
-                            contentItem: Text { 
-                                text: "СТАРТ"
-                                font.pixelSize: 24; font.bold: true; color: "white"
-                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter 
+                        
+                        contentItem: RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 15
+                            Rectangle {
+                                width: 24; height: 24; radius: 12
+                                color: "white"
+                                visible: cameraController.isRecording
                             }
-                        }
-
-                        Button {
-                            Layout.fillWidth: true; Layout.preferredHeight: 90 
-                            visible: cameraController.status === "Камера запущена"
-                            onClicked: cameraController.stop_camera()
-                            background: Rectangle { color: parent.down ? "#c62828" : "#e53935"; radius: 16 }
-                            contentItem: Text { 
-                                text: "СТОП"
-                                font.pixelSize: 24; font.bold: true; color: "white"
-                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter 
-                            }
-                        }
-                    }
-
-                    // --- БЛОК ТЕЛЕМЕТРИИ (FPS) ---
-                    Rectangle {
-                        Layout.fillWidth: true; Layout.preferredHeight: 120
-                        Layout.topMargin: 20
-                        color: "#252525"; radius: 16; border.color: "#333"
-
-                        RowLayout {
-                            anchors.fill: parent; anchors.margins: 25
-                            
-                            // Статус
-                            ColumnLayout {
-                                spacing: 4
-                                Text { text: "СИСТЕМА"; color: "#888"; font.pixelSize: 14; font.bold: true }
-                                Text { 
-                                    text: cameraController.status === "Камера запущена" ? "ONLINE" : "OFFLINE"
-                                    color: cameraController.status === "Камера запущена" ? "#00e676" : "#666" 
-                                    font.pixelSize: 22; font.bold: true
-                                }
-                            }
-                            
-                            Item { Layout.fillWidth: true } 
-
-                            // FPS Counter
-                            RowLayout {
-                                spacing: 20
-                                Text { 
-                                    text: "FPS"; color: "#aaa"; font.pixelSize: 24; 
-                                    font.bold: true; verticalAlignment: Text.AlignBottom; bottomPadding: 6 
-                                }
-                                Text {
-                                    text: Math.round(cameraController.currentFps * 10) / 10
-                                    color: cameraController.currentFps > 25 ? "#00e676" : (cameraController.currentFps > 10 ? "#ffeb3b" : "#ff3d00")
-                                    font.pixelSize: 48; font.bold: true
-                                }
+                            Text { 
+                                text: cameraController.isRecording ? "ИДЕТ ЗАПИСЬ..." : "ЗАПИСЬ RAW"
+                                font.pixelSize: 22; font.bold: true; color: "white" 
                             }
                         }
                     }
                     
-                    Item { height: 10 }
+                    // СТОП (Отдельно, красный)
+                    Button {
+                        Layout.fillWidth: true; Layout.preferredHeight: 60
+                        text: "ОТКЛЮЧИТЬ ПИТАНИЕ"
+                        
+                        highlighted: true
+                        Material.accent: Material.Red
+                        
+                        enabled: cameraController.status === "ONLINE"
+                        onClicked: cameraController.stop_camera()
+                    }
                 }
-            }
-        }
-    }
 
-    // Диалог сохранения файла
-    FileDialog {
-        id: fileDialog
-        title: "Сохранить кадр"
-        currentFolder: StandardPaths.standardLocations(StandardPaths.PicturesLocation)[0]
-        nameFilters: ["JPEG Image (*.jpg)", "PNG Image (*.png)"]
-        onAccepted: {
-            var path = selectedFile.toString()
-            if (Qt.platform.os === "windows") {
-                path = path.replace(/^(file:\/{3})|(file:)/, "")
-            } else {
-                path = path.replace(/^(file:)/, "")
+                Item { Layout.fillHeight: true } // Распорка
+
+                // GAIN CONTROL
+                Rectangle {
+                    Layout.fillWidth: true; Layout.preferredHeight: 120
+                    color: "#2c2c2c"; radius: 12
+                    
+                    ColumnLayout {
+                        anchors.fill: parent; anchors.margins: 15
+                        Text { text: "Усиление (Gain)"; color: "white"; font.bold: true }
+                        
+                        Slider {
+                            Layout.fillWidth: true
+                            from: 0; to: 40; stepSize: 1
+                            value: cameraController.gainValue
+                            onMoved: cameraController.gainValue = value
+                        }
+                        
+                        Text { 
+                            text: (1.0 + cameraController.gainValue/20.0).toFixed(1) + "x"
+                            color: "#00e676"; font.bold: true
+                            Layout.alignment: Qt.AlignRight
+                        }
+                    }
+                }
+
+                // FPS COUNTER
+                Rectangle {
+                    Layout.fillWidth: true; Layout.preferredHeight: 100
+                    color: "#252525"; radius: 12
+                    border.color: "#333"
+                    
+                    RowLayout {
+                        anchors.centerIn: parent
+                        spacing: 20
+                        Text { 
+                            text: "FPS"; color: "#aaa"; font.pixelSize: 24; 
+                            font.bold: true; verticalAlignment: Text.AlignBottom; bottomPadding: 6 
+                        }
+                        Text {
+                            text: Math.round(cameraController.currentFps * 10) / 10
+                            color: cameraController.currentFps > 24 ? "#00e676" : "#ff3d00"
+                            font.pixelSize: 48; font.bold: true
+                        }
+                    }
+                }
+                
+                Item { height: 10 }
             }
-            cameraController.capture_photo(path, "JPEG", 95)
         }
     }
 }

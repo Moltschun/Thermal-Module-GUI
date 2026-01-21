@@ -33,7 +33,7 @@ if __name__ == "__main__":
     # 3. Настраиваем движок QML
     engine = QQmlApplicationEngine()
     
-    # ВАЖНО: Регистрируем провайдер с именем "live"
+    
     # Теперь в QML можно писать source: "image://live/..."
     engine.addImageProvider("live", image_provider)
     
