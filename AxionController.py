@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 
 """
-Axion Controller v6.0 (Zero Latency Fix)
-- FIXED: FFMPEG flags applied BEFORE importing cv2 (Critical!)
-- Architecture: Reader Thread (Net) + Worker Thread (UI)
+Axion Controller v10.0 (Golden Standard)
+- Engine: Classic Synchronous (Restores 25 FPS)
+- Controls: Fixed Stop/Start logic (Buttons work)
+- Buffer: Hardware managed (Best balance)
 """
 
 import os
-
-# === [КРИТИЧЕСКИ ВАЖНО] ===
-# Настройки должны быть строго ДО импорта cv2!
-# Иначе библиотека загрузится с дефолтным буфером в 3 секунды.
+# Эти флаги оставляем - они бесплатные и помогают снизить задержку
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|fflags;nobuffer|flags;low_delay"
 
 import time
@@ -29,7 +27,7 @@ from PySide6.QtQuick import QQuickImageProvider
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Axion_System")
 
-# === 1. ПРОВАЙДЕР ДЛЯ QML ===
+# === 1. ПРОВАЙДЕР ===
 class LiveImageProvider(QQuickImageProvider):
     def __init__(self):
         super().__init__(QQuickImageProvider.ImageType.Image)
@@ -46,7 +44,7 @@ class LiveImageProvider(QQuickImageProvider):
             if not image.isNull():
                 self._current_image = image
 
-# === 2. ФОНОВАЯ ЗАПИСЬ ===
+# === 2. ЗАПИСЬ ===
 class FrameRecorder:
     def __init__(self):
         self.recording = False
@@ -57,7 +55,7 @@ class FrameRecorder:
         with self.lock:
             self.queue = []
         self.recording = True
-        logger.info(">>> ЗАПИСЬ НАЧАТА")
+        logger.info(">>> ЗАПИСЬ")
         
     def add_frame(self, frame):
         if self.recording:
@@ -66,7 +64,7 @@ class FrameRecorder:
                 
     def stop(self):
         self.recording = False
-        logger.info(f">>> ОСТАНОВКА ЗАПИСИ. Буфер: {len(self.queue)}")
+        logger.info(f">>> СТОП. Кадров: {len(self.queue)}")
         Thread(target=self._save_worker, args=(list(self.queue),), daemon=True).start()
         with self.lock:
             self.queue = []
@@ -77,61 +75,12 @@ class FrameRecorder:
         folder = os.path.join("Recordings", f"Session_{timestamp}")
         os.makedirs(folder, exist_ok=True)
         
-        logger.info(f"Сохранение: {folder}...")
         for i, frame in enumerate(frames):
             fname = os.path.join(folder, f"frame_{i:04d}.tiff")
             cv2.imwrite(fname, frame)
-        logger.info("Сохранение завершено.")
+        logger.info("Сохранено.")
 
-# === 3. ПОТОК-ЧИТАТЕЛЬ (СЕТЬ) ===
-class RTSPReader(Thread):
-    def __init__(self, url):
-        super().__init__()
-        self.url = url
-        self.running = False
-        self.latest_frame = None
-        self.lock = Lock()
-        self.connected = False
-
-    def run(self):
-        self.running = True
-        logger.info(f"Reader Start: {self.url}")
-        
-        while self.running:
-            # Явно указываем бэкенд FFMPEG
-            cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
-            
-            # Агрессивное отключение буфера
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 0) 
-            
-            if not cap.isOpened():
-                self.connected = False
-                time.sleep(1)
-                continue
-            
-            self.connected = True
-            logger.info("RTSP Connected! Draining buffer...")
-            
-            while self.running and cap.isOpened():
-                ret, frame = cap.read()
-                if not ret: break
-                
-                # Мгновенная перезапись (Drop frame policy)
-                with self.lock:
-                    self.latest_frame = frame
-            
-            cap.release()
-            self.connected = False
-
-    def get_frame(self):
-        with self.lock:
-            return self.latest_frame
-
-    def stop(self):
-        self.running = False
-        self.join()
-
-# === 4. ПОТОК-ХУДОЖНИК (UI) ===
+# === 3. РАБОЧИЙ ПОТОК (КЛАССИКА 25 FPS) ===
 class AxionWorker(QThread):
     frame_ready = Signal(QImage)
     status_changed = Signal(str)
@@ -143,38 +92,34 @@ class AxionWorker(QThread):
         super().__init__()
         self.recorder = recorder
         self.running = False
-        self.reader = None
         self.digital_gain = 1.0
 
     def run(self):
-        self.status_changed.emit("Запуск...")
+        self.status_changed.emit("Подключение...")
         self.running = True
         
-        self.reader = RTSPReader(self.RTSP_URL)
-        self.reader.start()
+        # Стандартная инициализация (самая надежная)
+        cap = cv2.VideoCapture(self.RTSP_URL, cv2.CAP_FFMPEG)
+        # Ставим буфер 0 один раз при старте
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 0)
+        
+        if not cap.isOpened():
+            self.status_changed.emit("Ошибка подключения")
+            time.sleep(1)
+            self.running = False
+            return
+            
+        self.status_changed.emit("ONLINE")
         
         fps_counter = 0
         fps_timer = time.time()
         
-        # Переменная для проверки "свежести" кадра
-        last_frame_id = 0 
-        
-        while self.running:
-            if not self.reader.connected:
-                self.status_changed.emit("Поиск сети...")
-                time.sleep(0.1)
-                continue
+        while self.running and cap.isOpened():
+            # Читаем кадр как есть (без циклов пропуска) -> Это вернет 25 FPS
+            ret, frame = cap.read()
             
-            self.status_changed.emit("ONLINE")
-            
-            frame = self.reader.get_frame()
-            
-            # Проверка: если кадр тот же самый (Reader не успел получить новый),
-            # мы не перерисовываем его, чтобы не грузить UI зря.
-            # Но так как объекты frame в памяти меняются, просто проверим на None
-            if frame is None:
-                time.sleep(0.001)
-                continue
+            if not ret:
+                break
                 
             # 1. Запись
             self.recorder.add_frame(frame)
@@ -183,28 +128,23 @@ class AxionWorker(QThread):
             if self.digital_gain != 1.0:
                 frame = cv2.convertScaleAbs(frame, alpha=self.digital_gain, beta=0)
             
-            # 3. Конвертация
+            # 3. UI
             try:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb.shape
                 qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
                 self.frame_ready.emit(qimg)
-            except Exception:
+            except:
                 pass
 
             # 4. FPS
             fps_counter += 1
             if time.time() - fps_timer >= 1.0:
-                real_fps = fps_counter / (time.time() - fps_timer)
-                self.fps_updated.emit(real_fps)
+                self.fps_updated.emit(fps_counter / (time.time() - fps_timer))
                 fps_counter = 0
                 fps_timer = time.time()
-                
-            # Важно: даем Reader'у шанс захватить управление (GIL)
-            time.sleep(0.005) 
 
-        if self.reader:
-            self.reader.stop()
+        cap.release()
         self.status_changed.emit("Остановлено")
 
     def stop(self):
@@ -214,7 +154,7 @@ class AxionWorker(QThread):
     def set_gain(self, val):
         self.digital_gain = 1.0 + (val / 20.0)
 
-# === 5. КОНТРОЛЛЕР ===
+# === 4. КОНТРОЛЛЕР ===
 class AxionController(QObject):
     imagePathChanged = Signal()
     statusChanged = Signal()
@@ -237,19 +177,29 @@ class AxionController(QObject):
 
     @Slot()
     def start_camera(self):
-        if self.worker and self.worker.isRunning(): return
+        # Если уже работает - не запускаем второй раз
+        if self.worker is not None and self.worker.isRunning():
+            return
+            
         self.worker = AxionWorker(self.recorder)
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.status_changed.connect(self._on_status)
         self.worker.fps_updated.connect(self._on_fps)
-        self.worker.start()
         self.worker.set_gain(self._gain)
+        self.worker.start()
 
     @Slot()
     def stop_camera(self):
+        # Исправленная логика остановки (чтобы кнопки не висли)
         if self.worker:
             self.worker.stop()
+            self.worker.deleteLater() # Важно для очистки
             self.worker = None
+            
+        self._status = "Отключено"
+        self._fps = 0.0
+        self.statusChanged.emit()
+        self.currentFpsChanged.emit()
 
     @Slot()
     def toggle_recording(self):
