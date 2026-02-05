@@ -149,6 +149,24 @@ ApplicationWindow {
 
                 Item { Layout.fillHeight: true } // Распорка
 
+                Button {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 60
+                    text: "СБОРКА .NPY"
+                    font.bold: true
+                    
+                    // Активна, когда НЕ идет запись и камера отключена (или просто не пишем)
+                    enabled: !cameraController.isRecording
+                    
+                    highlighted: true
+                    Material.accent: Material.Orange 
+
+                    onClicked: cameraController.convert_to_npy()
+                    
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Собрать последнюю TIFF-сессию в массив NumPy"
+                }
+
                 // GAIN CONTROL
                 Rectangle {
                     Layout.fillWidth: true; Layout.preferredHeight: 120
