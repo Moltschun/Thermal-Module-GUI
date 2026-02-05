@@ -8,6 +8,8 @@ Axion Controller v13.0 (Release Candidate)
 """
 
 import os
+import glob
+import numpy as np
 # Оптимизация задержки
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|fflags;nobuffer|flags;low_delay"
 
@@ -197,6 +199,7 @@ class AxionController(QObject):
         self.recorder = FrameRecorder()
         self.worker = None
         self.provider = None
+        self._task_progress = 0.0
 
     def set_image_provider(self, provider):
         self.provider = provider
@@ -231,6 +234,50 @@ class AxionController(QObject):
             self.recorder.start()
         self.isRecordingChanged.emit()
 
+    progressChanged = Signal(float)
+    
+    @Slot()
+    def convert_to_npy(self):
+        """Конвертирует последнюю сессию TIFF в один файл .npy"""
+        # Ищем все папки сессий
+        recordings_path = "Recordings"
+        if not os.path.exists(recordings_path):
+            logger.error("Папка Recordings не найдена")
+            return
+
+        sessions = [os.path.join(recordings_path, d) for d in os.listdir(recordings_path) 
+                    if os.path.isdir(os.path.join(recordings_path, d)) and d.startswith("Session_")]
+        
+        if not sessions:
+            logger.warning("Нет сессий для конвертации")
+            return
+
+        # Берем самую свежую папку
+        last_session = max(sessions, key=os.path.getctime)
+        logger.info(f"Начинаю конвертацию сессии: {last_session}")
+
+        def run_conversion():
+            try:
+                # Загружаем все tiff кадры
+                files = sorted(glob.glob(os.path.join(last_session, "*.tiff")))
+                if not files: return
+
+                frames = [cv2.imread(f) for f in files]
+                # Конвертируем в RGB для корректного отображения в будущем
+                frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames if f is not None]
+                
+                video_array = np.array(frames_rgb, dtype=np.uint8)
+                output_path = last_session + ".npy"
+                
+                np.save(output_path, video_array)
+                logger.info(f">>> КОНВЕРТАЦИЯ ЗАВЕРШЕНА: {output_path}")
+            except Exception as e:
+                logger.error(f"Ошибка конвертера: {e}")
+
+        # Запускаем в отдельном потоке, чтобы не вешать интерфейс
+        Thread(target=run_conversion, daemon=False).start()
+
+        
     @Property(bool, notify=isRecordingChanged)
     def isRecording(self): return self.recorder.recording
 
@@ -256,6 +303,10 @@ class AxionController(QObject):
 
     @Property(float, notify=currentFpsChanged)
     def currentFps(self): return self._fps
+
+    @Property(float, notify=progressChanged)
+    def taskProgress(self):
+        return self._task_progress
 
     @Property(float, notify=gainValueChanged)
     def gainValue(self): return self._gain
