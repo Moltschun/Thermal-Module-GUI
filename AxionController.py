@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
 
 """
-Axion Controller v13.0 (Release Candidate)
-- Engine: Classic Synchronous (Stable 25 FPS UI)
-- Recording: Dynamic FPS Decimation (Saves ~60% disk space)
-- Status: Production Ready (No debug prints)
+Axion Controller v13.1 (Thermal Edition)
+- Palette: IRON (via cv2.COLORMAP_INFERNO)
+- Hardware: Optimized for Raspberry Pi 5
 """
 
 import os
 import glob
 import numpy as np
-# Оптимизация задержки
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|fflags;nobuffer|flags;low_delay"
-
 import time
 import logging
 import cv2
@@ -26,10 +22,12 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QImage, QColor
 from PySide6.QtQuick import QQuickImageProvider
 
+# Оптимизация задержки для RTSP
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|fflags;nobuffer|flags;low_delay"
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Axion_System")
 
-# === 1. ПРОВАЙДЕР ===
 class LiveImageProvider(QQuickImageProvider):
     def __init__(self):
         super().__init__(QQuickImageProvider.ImageType.Image)
@@ -46,7 +44,6 @@ class LiveImageProvider(QQuickImageProvider):
             if not image.isNull():
                 self._current_image = image
 
-# === 2. ЗАПИСЬ ===
 class FrameRecorder:
     def __init__(self):
         self.recording = False
@@ -59,7 +56,7 @@ class FrameRecorder:
             self.queue = []
         self.start_time = time.time()
         self.recording = True
-        logger.info(">>> ЗАПИСЬ: СТАРТ (Smart Mode)")
+        logger.info(">>> ЗАПИСЬ СТАРТ: Режим IRON")
         
     def add_frame(self, frame):
         if self.recording:
@@ -70,28 +67,21 @@ class FrameRecorder:
         self.recording = False
         duration = time.time() - self.start_time
         count = len(self.queue)
-        avg_fps = count / duration if duration > 0 else 0
-        logger.info(f">>> ЗАПИСЬ ЗАВЕРШЕНА. Время: {duration:.1f}с. Кадров: {count}. Ср. FPS: {avg_fps:.1f}")
-        
-        # Фоновое сохранение
+        logger.info(f">>> ЗАПИСЬ ЗАВЕРШЕНА. Кадров: {count}")
         Thread(target=self._save_worker, args=(list(self.queue),), daemon=True).start()
-        
         with self.lock:
             self.queue = []
 
     def _save_worker(self, frames):
         if not frames: return
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        folder = os.path.join("Recordings", f"Session_{timestamp}")
+        folder = os.path.join("Recordings", f"Thermal_{timestamp}")
         os.makedirs(folder, exist_ok=True)
-        
-        logger.info(f"Сохранение {len(frames)} кадров в {folder}...")
         for i, frame in enumerate(frames):
             fname = os.path.join(folder, f"frame_{i:04d}.tiff")
             cv2.imwrite(fname, frame)
-        logger.info("Сохранение выполнено успешно.")
+        logger.info(f"Данные сохранены в {folder}")
 
-# === 3. РАБОЧИЙ ПОТОК ===
 class AxionWorker(QThread):
     frame_ready = Signal(QImage)
     status_changed = Signal(str)
@@ -106,66 +96,58 @@ class AxionWorker(QThread):
         self.digital_gain = 1.0
 
     def run(self):
-        self.status_changed.emit("Подключение...")
+        self.status_changed.emit("Захват...")
         self.running = True
         
         cap = cv2.VideoCapture(self.RTSP_URL, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 0)
         
         if not cap.isOpened():
-            self.status_changed.emit("Ошибка: Камера недоступна")
-            time.sleep(2)
-            self.running = False
+            self.status_changed.emit("ОШИБКА СЕНСОРА")
             return
             
         self.status_changed.emit("ONLINE")
-        
         fps_counter = 0
         fps_timer = time.time()
-        
-        # Таймер для динамической записи
         last_rec_time = 0.0
         
         while self.running and cap.isOpened():
             ret, frame = cap.read()
             if not ret: break
             
-            now = time.time()
-            
-            # === [SMART REC ALGORITHM] ===
-            if self.recorder.recording:
-                elapsed = now - self.recorder.start_time
-                
-                # График снижения частоты кадров
-                if elapsed < 25.0:
-                    target_rec_fps = 25.0 # Max Quality
-                elif elapsed < 50.0:
-                    target_rec_fps = 15.0 # High
-                elif elapsed < 75.0:
-                    target_rec_fps = 10.0 # Medium
-                else:
-                    target_rec_fps = 5.0  # Eco Mode
-                
-                min_interval = 1.0 / target_rec_fps
-                
-                if (now - last_rec_time) >= min_interval:
-                    self.recorder.add_frame(frame)
-                    last_rec_time = now
-            # =============================
-            
-            # UI Render (Всегда 25 FPS)
+            # 1. Применяем усиление (Gain)
             if self.digital_gain != 1.0:
                 frame = cv2.convertScaleAbs(frame, alpha=self.digital_gain, beta=0)
+
+            # 2. ПРЕОБРАЗОВАНИЕ В IRON (Inferno)
+            # Если камера выдает цветной шум, переводим в ч/б для чистого наложения карты
+            if len(frame.shape) == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = frame
             
+            # Накладываем палитру IRON
+            thermal_frame = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
+            
+            now = time.time()
+            # 3. Динамическая запись (Smart FPS)
+            if self.recorder.recording:
+                elapsed = now - self.recorder.start_time
+                target_rec_fps = 25.0 if elapsed < 25.0 else (15.0 if elapsed < 50.0 else 5.0)
+                if (now - last_rec_time) >= (1.0 / target_rec_fps):
+                    self.recorder.add_frame(thermal_frame)
+                    last_rec_time = now
+            
+            # 4. Вывод в UI
             try:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # В OpenCV после applyColorMap получаем BGR, конвертируем в RGB для Qt
+                rgb = cv2.cvtColor(thermal_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb.shape
                 qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
                 self.frame_ready.emit(qimg)
-            except:
+            except Exception:
                 pass
 
-            # FPS Counter
             fps_counter += 1
             if now - fps_timer >= 1.0:
                 self.fps_updated.emit(fps_counter / (now - fps_timer))
@@ -173,7 +155,7 @@ class AxionWorker(QThread):
                 fps_timer = now
 
         cap.release()
-        self.status_changed.emit("Остановлено")
+        self.status_changed.emit("OFFLINE")
 
     def stop(self):
         self.running = False
@@ -182,32 +164,30 @@ class AxionWorker(QThread):
     def set_gain(self, val):
         self.digital_gain = 1.0 + (val / 20.0)
 
-# === 4. КОНТРОЛЛЕР ===
 class AxionController(QObject):
     imagePathChanged = Signal()
     statusChanged = Signal()
     currentFpsChanged = Signal()
     gainValueChanged = Signal()
     isRecordingChanged = Signal()
+    progressChanged = Signal(float)
 
     def __init__(self):
         super().__init__()
         self._image_path = ""
-        self._status = "Готов"
+        self._status = "Инициализация"
         self._fps = 0.0
         self._gain = 0.0
         self.recorder = FrameRecorder()
         self.worker = None
         self.provider = None
-        self._task_progress = 0.0
 
     def set_image_provider(self, provider):
         self.provider = provider
 
     @Slot()
     def start_camera(self):
-        if self.worker is not None and self.worker.isRunning():
-            return
+        if self.worker and self.worker.isRunning(): return
         self.worker = AxionWorker(self.recorder)
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.status_changed.connect(self._on_status)
@@ -219,65 +199,36 @@ class AxionController(QObject):
     def stop_camera(self):
         if self.worker:
             self.worker.stop()
-            self.worker.deleteLater()
             self.worker = None
-        self._status = "Отключено"
-        self._fps = 0.0
+        self._status = "ОТКЛЮЧЕНО"
         self.statusChanged.emit()
-        self.currentFpsChanged.emit()
 
     @Slot()
     def toggle_recording(self):
-        if self.recorder.recording:
-            self.recorder.stop()
-        else:
-            self.recorder.start()
+        if self.recorder.recording: self.recorder.stop()
+        else: self.recorder.start()
         self.isRecordingChanged.emit()
 
-    progressChanged = Signal(float)
-    
     @Slot()
     def convert_to_npy(self):
-        """Конвертирует последнюю сессию TIFF в один файл .npy"""
-        # Ищем все папки сессий
         recordings_path = "Recordings"
-        if not os.path.exists(recordings_path):
-            logger.error("Папка Recordings не найдена")
-            return
-
-        sessions = [os.path.join(recordings_path, d) for d in os.listdir(recordings_path) 
-                    if os.path.isdir(os.path.join(recordings_path, d)) and d.startswith("Session_")]
+        if not os.path.exists(recordings_path): return
+        sessions = [os.path.join(recordings_path, d) for d in os.listdir(recordings_path) if d.startswith("Thermal_")]
+        if not sessions: return
         
-        if not sessions:
-            logger.warning("Нет сессий для конвертации")
-            return
-
-        # Берем самую свежую папку
         last_session = max(sessions, key=os.path.getctime)
-        logger.info(f"Начинаю конвертацию сессии: {last_session}")
-
-        def run_conversion():
-            try:
-                # Загружаем все tiff кадры
-                files = sorted(glob.glob(os.path.join(last_session, "*.tiff")))
-                if not files: return
-
-                frames = [cv2.imread(f) for f in files]
-                # Конвертируем в RGB для корректного отображения в будущем
-                frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames if f is not None]
-                
-                video_array = np.array(frames_rgb, dtype=np.uint8)
-                output_path = last_session + ".npy"
-                
-                np.save(output_path, video_array)
-                logger.info(f">>> КОНВЕРТАЦИЯ ЗАВЕРШЕНА: {output_path}")
-            except Exception as e:
-                logger.error(f"Ошибка конвертера: {e}")
-
-        # Запускаем в отдельном потоке, чтобы не вешать интерфейс
-        Thread(target=run_conversion, daemon=False).start()
-
         
+        def run_conversion():
+            files = sorted(glob.glob(os.path.join(last_session, "*.tiff")))
+            if not files: return
+            frames = [cv2.imread(f) for f in files]
+            # Сохраняем уже в IRON-палитре (RGB)
+            frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames if f is not None]
+            np.save(last_session + ".npy", np.array(frames_rgb, dtype=np.uint8))
+            logger.info(f"Массив NumPy готов: {last_session}.npy")
+
+        Thread(target=run_conversion, daemon=True).start()
+
     @Property(bool, notify=isRecordingChanged)
     def isRecording(self): return self.recorder.recording
 
@@ -303,10 +254,6 @@ class AxionController(QObject):
 
     @Property(float, notify=currentFpsChanged)
     def currentFps(self): return self._fps
-
-    @Property(float, notify=progressChanged)
-    def taskProgress(self):
-        return self._task_progress
 
     @Property(float, notify=gainValueChanged)
     def gainValue(self): return self._gain
