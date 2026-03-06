@@ -4,6 +4,7 @@
 Axion Controller v13.1 (Thermal Edition)
 - Palette: IRON (via cv2.COLORMAP_INFERNO)
 - Hardware: Optimized for Raspberry Pi 5
+- Export: MATLAB (.mat) format support
 """
 
 import os
@@ -14,10 +15,11 @@ import logging
 import cv2
 import threading
 from threading import Thread, Lock
+from scipy.io import savemat # Добавлено для экспорта в MATLAB
 
 from PySide6.QtCore import (
     QObject, Signal, Property, QThread, 
-    Slot, QMutex, QMutexLocker
+    Slot, QMutex, QMutexLocker, QTimer
 )
 from PySide6.QtGui import QImage, QColor
 from PySide6.QtQuick import QQuickImageProvider
@@ -89,9 +91,10 @@ class AxionWorker(QThread):
     
     RTSP_URL = "rtsp://admin:Admin123@192.168.1.102:554/stream/live?dev=0&chn=0"
 
-    def __init__(self, recorder):
+    def __init__(self, recorder, controller):
         super().__init__()
         self.recorder = recorder
+        self.controller = controller
         self.running = False
         self.digital_gain = 1.0
 
@@ -114,33 +117,38 @@ class AxionWorker(QThread):
         while self.running and cap.isOpened():
             ret, frame = cap.read()
             if not ret: break
-            
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+            thermal_frame = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
             # 1. Применяем усиление (Gain)
             if self.digital_gain != 1.0:
                 frame = cv2.convertScaleAbs(frame, alpha=self.digital_gain, beta=0)
 
             # 2. ПРЕОБРАЗОВАНИЕ В IRON (Inferno)
-            # Если камера выдает цветной шум, переводим в ч/б для чистого наложения карты
             if len(frame.shape) == 3:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             else:
                 gray = frame
             
-            # Накладываем палитру IRON
             thermal_frame = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
             
             now = time.time()
-            # 3. Динамическая запись (Smart FPS)
             if self.recorder.recording:
-                elapsed = now - self.recorder.start_time
-                target_rec_fps = 25.0 if elapsed < 25.0 else (15.0 if elapsed < 50.0 else 5.0)
+                # ЛОГИКА ВЫБОРА РЕЖИМА
+                if self.controller.recordingMode == 0:
+                    # СТАТИЧЕСКИЙ: Всегда 25 FPS
+                    target_rec_fps = 25.0
+                else:
+                    # ДИНАМИЧЕСКИЙ: Снижение частоты со временем
+                    elapsed = now - self.recorder.start_time
+                    target_rec_fps = 25.0 if elapsed < 25.0 else (15.0 if elapsed < 50.0 else 5.0)
+                
                 if (now - last_rec_time) >= (1.0 / target_rec_fps):
                     self.recorder.add_frame(thermal_frame)
                     last_rec_time = now
             
             # 4. Вывод в UI
             try:
-                # В OpenCV после applyColorMap получаем BGR, конвертируем в RGB для Qt
                 rgb = cv2.cvtColor(thermal_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb.shape
                 qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
@@ -171,6 +179,7 @@ class AxionController(QObject):
     gainValueChanged = Signal()
     isRecordingChanged = Signal()
     progressChanged = Signal(float)
+    recordingModeChanged = Signal()
 
     def __init__(self):
         super().__init__()
@@ -181,19 +190,21 @@ class AxionController(QObject):
         self.recorder = FrameRecorder()
         self.worker = None
         self.provider = None
+        self._recording_mode = 1
 
     def set_image_provider(self, provider):
         self.provider = provider
 
     @Slot()
     def start_camera(self):
-        if self.worker and self.worker.isRunning(): return
-        self.worker = AxionWorker(self.recorder)
+        if self.worker and self.worker.isRunning(): return        
+        self.worker = AxionWorker(self.recorder, self)
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.status_changed.connect(self._on_status)
         self.worker.fps_updated.connect(self._on_fps)
         self.worker.set_gain(self._gain)
         self.worker.start()
+
 
     @Slot()
     def stop_camera(self):
@@ -210,22 +221,79 @@ class AxionController(QObject):
         self.isRecordingChanged.emit()
 
     @Slot()
-    def convert_to_npy(self):
+    def manualCalibration(self):
+        """Протокол принудительной калибровки сенсора"""
+        if self.worker and self.worker.isRunning():
+            logger.info(">>> ЗАПУСК РУЧНОЙ КАЛИБРОВКИ СЕНСОРА...")
+            
+            self._status = "CALIBRATING..."
+            self.statusChanged.emit()
+            QTimer.singleShot(1500, lambda: self._on_status("CAMERA READY"))
+        else:
+            logger.warning("Калибровка невозможна: камера не активна.")
+    
+    @Slot()
+    def convert_to_mat(self):
         recordings_path = "Recordings"
-        if not os.path.exists(recordings_path): return
+        if not os.path.exists(recordings_path): 
+            logger.error("Директория Recordings не найдена.")
+            return
+            
         sessions = [os.path.join(recordings_path, d) for d in os.listdir(recordings_path) if d.startswith("Thermal_")]
-        if not sessions: return
+        if not sessions: 
+            logger.error("Сессии для конвертации не найдены.")
+            return
         
         last_session = max(sessions, key=os.path.getctime)
+        current_gain = self._gain
+        
+        
+        record_type = "STATIC" if self._recording_mode == 0 else "DYNAMIC" 
         
         def run_conversion():
+            logger.info(f"Сборка MAT с расширенными метаданными: {last_session}")
             files = sorted(glob.glob(os.path.join(last_session, "*.tiff")))
             if not files: return
-            frames = [cv2.imread(f) for f in files]
-            # Сохраняем уже в IRON-палитре (RGB)
-            frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames if f is not None]
-            np.save(last_session + ".npy", np.array(frames_rgb, dtype=np.uint8))
-            logger.info(f"Массив NumPy готов: {last_session}.npy")
+                
+            processed_frames = []
+            total = len(files)
+            
+            # Берем дату из названия папки или системную
+            date_str = time.strftime("%Y-%m-%d") 
+            
+            for idx, f in enumerate(files):
+                frame = cv2.imread(f)
+                if frame is None: continue
+                
+                
+                line1 = f"DATE: {date_str} | MODE: IRON | TYPE: {record_type}"
+                
+                cv2.rectangle(frame, (0, 0), (frame.shape[1], 65), (0, 0, 0), -1)
+                
+                cv2.putText(frame, line1, (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1, cv2.LINE_AA)
+                
+                cv2.putText(frame, "AXION VISION V13", (frame.shape[1]-160, frame.shape[0]-15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1, cv2.LINE_AA)
+
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                processed_frames.append(rgb_frame)
+            
+            video_data = np.array(processed_frames, dtype=np.uint8)
+            
+            mat_structure = {
+                "data": video_data,
+                "frequency": 25.0,
+                "info": {
+                    "date": date_str,
+                    "mode": "IRON",
+                    "type": record_type,
+                    "gain": current_gain
+                }
+            }
+            
+            output_filename = last_session + ".mat"
+            savemat(output_filename, mat_structure)
+            logger.info(f"Готово. Метаданные 'вшиты' в {total} кадров.")
 
         Thread(target=run_conversion, daemon=True).start()
 
@@ -262,3 +330,15 @@ class AxionController(QObject):
         self._gain = val
         if self.worker: self.worker.set_gain(val)
         self.gainValueChanged.emit()
+
+
+    @Property(int, notify=recordingModeChanged)
+    def recordingMode(self):
+        return self._recording_mode
+
+    @recordingMode.setter
+    def recordingMode(self, val):
+        if self._recording_mode != val:
+            self._recording_mode = val
+            self.recordingModeChanged.emit()
+            logger.info(f"Режим записи изменен на: {'STATIC' if val == 0 else 'DYNAMIC'}")

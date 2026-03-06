@@ -1,6 +1,5 @@
 /*
- * Main Interface v4.1 (Big Start Button)
- * - Start Button: Increased size and visibility
+ * Main Interface v4.2 (MATLAB Export Edition)
  */
 
 import QtQuick
@@ -81,12 +80,10 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 15
 
-                    // === [MODIFIED] БОЛЬШАЯ КНОПКА СТАРТ ===
                     Button {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 120 // Сделали большой размер
+                        Layout.preferredHeight: 120 
                         
-                        // Блокируем кнопку, если камера уже работает
                         enabled: cameraController.status !== "ONLINE"
                         
                         text: "ЗАПУСК"
@@ -94,7 +91,7 @@ ApplicationWindow {
                         font.bold: true
                         
                         highlighted: true
-                        Material.accent: Material.Green // Ярко-зеленый цвет
+                        Material.accent: Material.Green 
                         
                         onClicked: cameraController.start_camera()
                     }
@@ -110,7 +107,6 @@ ApplicationWindow {
                             radius: 12
                             opacity: parent.enabled ? 1 : 0.3 
                             
-                            // Пульсация при записи
                             SequentialAnimation on opacity {
                                 running: cameraController.isRecording
                                 loops: Animation.Infinite
@@ -134,14 +130,12 @@ ApplicationWindow {
                         }
                     }
                     
-                    // СТОП (Отдельно, красный)
+                    // СТОП
                     Button {
                         Layout.fillWidth: true; Layout.preferredHeight: 60
                         text: "ОТКЛЮЧИТЬ ПИТАНИЕ"
-                        
                         highlighted: true
                         Material.accent: Material.Red
-                        
                         enabled: cameraController.status === "ONLINE"
                         onClicked: cameraController.stop_camera()
                     }
@@ -152,21 +146,101 @@ ApplicationWindow {
                 Button {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 60
-                    text: "СБОРКА .NPY"
+                    text: "СБОРКА .MAT"
                     font.bold: true
                     
-                    // Активна, когда НЕ идет запись и камера отключена (или просто не пишем)
                     enabled: !cameraController.isRecording
-                    
                     highlighted: true
                     Material.accent: Material.Orange 
 
-                    onClicked: cameraController.convert_to_npy()
+                    // ИЗМЕНЕНО: Вызов нового метода контроллера
+                    onClicked: cameraController.convert_to_mat()
                     
                     ToolTip.visible: hovered
-                    ToolTip.text: "Собрать последнюю TIFF-сессию в массив NumPy"
+                    ToolTip.text: "Собрать последнюю TIFF-сессию в массив Matlab"
                 }
 
+                Button {
+                    id: calibButton
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 50
+                    text: "CALIBRATE SENSOR"
+                    enabled: cameraController.status !== "OFFLINE" // Активна только при включенной камере
+                    
+                    contentItem: RowLayout {
+                        spacing: 10
+                        anchors.centerIn: parent
+
+                        Text {
+                            text: "🔄" 
+                            font.pixelSize: 18
+                            color: calibButton.enabled ? "#00e676" : "#444"
+                        }
+
+                        Text {
+                            text: "FFC CALIBRATION"
+                            color: calibButton.enabled ? "white" : "#444"
+                            font.bold: true
+                            font.pixelSize: 14
+                        }
+                    }
+                
+                    background: Rectangle {
+                        color: calibButton.pressed ? "#1b5e20" : (calibButton.enabled ? "#2e7d32" : "#1a1a1a")
+                        radius: 8
+                        border.color: calibButton.enabled ? "#00e676" : "#333"
+                        border.width: 1
+                    }
+                
+                    onClicked: {
+                        cameraController.manualCalibration()
+                    }
+                }
+
+                // Вставить в ColumnLayout правой панели управления
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 70
+                    color: "#2c2c2c"
+                    radius: 12
+                
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 15
+                        anchors.rightMargin: 15
+                
+                        ColumnLayout {
+                            spacing: 2
+                            Text { 
+                                text: "РЕЖИМ ЗАПИСИ"
+                                color: "#808080"
+                                font.pixelSize: 10
+                                font.bold: true
+                            }
+                            Text { 
+                                text: cameraController.recordingMode === 0 ? "STATIC (25 FPS)" : "DYNAMIC (VFR)"
+                                color: cameraController.recordingMode === 0 ? "#2196f3" : "#ff9800"
+                                font.pixelSize: 14
+                                font.bold: true
+                            }
+                        }
+                
+                        Item { Layout.fillWidth: true }
+                
+                        Switch {
+                            checked: cameraController.recordingMode === 1
+                            onToggled: {
+                                cameraController.recordingMode = checked ? 1 : 0
+                            }
+                            
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Вкл - Динамический (экономия), Выкл - Статический (25 FPS)"
+                        }
+                    }
+                }
+
+                
                 // GAIN CONTROL
                 Rectangle {
                     Layout.fillWidth: true; Layout.preferredHeight: 120
